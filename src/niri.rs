@@ -109,6 +109,7 @@ use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::XdgActivationState;
 use smithay::wayland::xdg_foreign::XdgForeignState;
+use wayland_backend::server::ObjectId;
 
 use crate::animation::Clock;
 use crate::backend::tty::SurfaceDmabufFeedback;
@@ -138,8 +139,10 @@ use crate::layout::{HitType, Layout, LayoutElement as _, MonitorRenderElement};
 use crate::niri_render_elements;
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
+use crate::protocols::hyprland_lock_notify::HyprlandLockNotifierState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
+use crate::protocols::raw::hyprland_lock_notify::v1::server::hyprland_lock_notification_v1::HyprlandLockNotificationV1;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
 use crate::protocols::virtual_pointer::VirtualPointerManagerState;
 use crate::pw_utils::{Cast, PipeWire};
@@ -357,6 +360,8 @@ pub struct Niri {
     pub mods_with_finger_scroll_binds: HashSet<Modifiers>,
 
     pub lock_state: LockState,
+    pub hyprland_lock_notifier_state: HyprlandLockNotifierState,
+    pub hyprland_lock_notififications: HashMap<ObjectId, HyprlandLockNotificationV1>,
 
     pub screenshot_ui: ScreenshotUi,
     pub config_error_notification: ConfigErrorNotification,
@@ -2347,6 +2352,9 @@ impl Niri {
         let mutter_x11_interop_state =
             MutterX11InteropManagerState::new::<State, _>(&display_handle, move |_| true);
 
+        let hyprland_lock_notifier_state =
+            HyprlandLockNotifierState::new::<State, _>(&display_handle, move |_| true);
+
         #[cfg(test)]
         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
 
@@ -2581,6 +2589,8 @@ impl Niri {
             mods_with_finger_scroll_binds,
 
             lock_state: LockState::Unlocked,
+            hyprland_lock_notifier_state,
+            hyprland_lock_notififications: HashMap::new(),
 
             screenshot_ui,
             config_error_notification,
@@ -2923,6 +2933,7 @@ impl Niri {
                 if all_locked {
                     let lock = confirmation.ext_session_lock().clone();
                     confirmation.lock();
+                    self.notify_locked();
                     self.lock_state = LockState::Locked(lock);
                 } else {
                     // Still waiting.
@@ -4371,6 +4382,7 @@ impl Niri {
                         // All outputs are locked, report success.
                         let lock = confirmation.ext_session_lock().clone();
                         confirmation.lock();
+                        self.notify_locked();
                         self.lock_state = LockState::Locked(lock);
                     } else {
                         // Still waiting for other outputs.
@@ -5601,6 +5613,7 @@ impl Niri {
             // can lock right away.
             let lock = confirmation.ext_session_lock().clone();
             confirmation.lock();
+            self.notify_locked();
             self.lock_state = LockState::Locked(lock);
 
             return;
@@ -5678,6 +5691,7 @@ impl Niri {
                     // There are no outputs, lock the session right away.
                     let lock = confirmation.ext_session_lock().clone();
                     confirmation.lock();
+                    self.notify_locked();
                     self.lock_state = LockState::Locked(lock);
                 } else {
                     // There are outputs which we need to redraw before locking.
@@ -5703,7 +5717,20 @@ impl Niri {
         for output_state in self.output_state.values_mut() {
             output_state.lock_surface = None;
         }
+        self.notify_unlocked();
         self.queue_redraw_all();
+    }
+
+    pub fn notify_locked(&self) {
+        for (_, n) in &self.hyprland_lock_notififications {
+            n.locked();
+        }
+    }
+
+    pub fn notify_unlocked(&self) {
+        for (_, n) in &self.hyprland_lock_notififications {
+            n.unlocked();
+        }
     }
 
     pub fn new_lock_surface(&mut self, surface: LockSurface, output: &Output) {
